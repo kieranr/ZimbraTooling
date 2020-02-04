@@ -1,0 +1,352 @@
+#!/usr/bin/ksh 
+#
+##############################################################
+# DEBUG NOTES : CHANGE THE ABOVE LINE TO BE "#!/usr/bin/ksh -x" (no quotes) FOR 
+# A full VERBOSE DEBUG OF EACH STEP OF THE SCRIPT.
+# Don't even think of changing this shell to bash - it **WILL** BREAK.
+# Bash doesn't deal with Array's of data in the same was as KSH.  SIMPLES.
+##############################################################
+# Version: 0.02 - 10.1.2017 - 
+# Actually implemented the "rm -rf"
+# Also added the count for number of days retention
+# Really should start thinking about not running this every day - but weekly - and using the daily existing job to sync across the diff's
+# i.e. the normal zextras backup routine.
+# - Could I add the sync of that to this job as a "-i" called run ? (incremental?)
+#
+# Version: 0.02 - 10.1.2017 - 
+#
+# CHANGELOG:
+#
+
+
+# Need to specify this Variable soooo early on in the script... damn.
+ERROR=0
+
+# A little function called regularly in the script to determine if something has
+# broken - and if so increment a variable by 1 for each failure.
+################
+function error {
+	if [ $? -ne 0 ] ; then
+		(( ERROR = ERROR + 1 ))
+	else
+		ERROR=${ERROR}
+	fi
+}
+
+function usage {
+        echo "moo"
+
+}
+
+#######################
+## The Mail functions #
+#######################
+#
+# To get some logs to a mammil that cares... 
+# </Manny, Ice Age>
+
+################
+function mailer {
+echo "Mailing routine"
+echo "Status is ${1}"
+
+SENDER=kieran@kieranreynolds.co.uk
+RECIPIENTS=kieran@kieranreynolds.co.uk
+
+{
+	printf  "Please find enclosed a copy of the backup log file $LOG\n\n"
+	cat ${LOG}
+	printf "\n\tThat's all Folks.....\n"
+	} | ${MAILX} -s "Postie Mail Export ${1} - ${DSTAMP}" -A ${LOG} ${RECIPIENTS}
+
+}
+
+
+
+###############
+# SPACE CHECK #
+###############
+
+# Make the destination direction
+# And check that it exists.
+
+function spacecheck {
+
+USE=`df -h |grep ${EXPORTDIR} | awk '{ print $4 }' | cut -d'G' -f1`
+	if [ ${USE} -lt ${MINSPACE} ]; then
+		printf "Only ${USE}G Free - needs minimum of ${MINSPACE}G to complete\n" 2>&1 | ${LOGGY}
+		printf "Something failed.\n" 2>&1 | ${LOGGY}
+		MSTATUS=FAILED
+		mailer ${MSTATUS}
+			exit 2
+	elif [ ${USE} -gt ${MINSPACE} ] && [ ${USE} -lt ${WARNSPACE} ]; then
+		printf "Only ${USE}G Free - Today's will work, tomorrow's will fail\n" 2>&1 | ${LOGGY}
+		MSTATUS=WARNING
+		mailer ${MSTATUS}
+		# exit 0
+	fi
+
+}
+
+####################
+# MAKE DESTINATION #
+####################
+
+# Make the destination direction
+# And check that it exists.
+
+function mkdestination {
+
+if [ ! -d "/${EXPORTDIR}]/${DSTAMP}" ] ; then
+	printf "We need to make the backup directory ... /${DESTDIR}/${DSTAMP}\n" 2>&1 | ${LOGGY}
+	printf "mkdir /${EXPORTDIR}/${DSTAMP}\n" 2>&1 | ${LOGGY}
+	mkdir /${EXPORTDIR}/${DSTAMP} 2>&1 | ${LOGGY}
+	chmod 775 /${EXPORTDIR}/${DSTAMP} 2>&1 | ${LOGGY}
+	ls -al /${EXPORTDIR}/ 2>&1 | ${LOGGY}
+else
+	printf "Already exists - erm - how ?\n" 2>&1 | ${LOGGY}
+	ls -al /${EXPORTDIR}/
+	printf "Eh ? ... /${EXPORTDIR}/${DSTAMP}\n" 2>&1 | ${LOGGY}
+
+fi
+
+	ls -al /${EXPORTDIR}/
+
+}
+
+##########
+# EXPORT #
+##########
+
+# 
+
+function doexport {
+
+# Let's do the backup
+printf "${ZXSUITE} backup doExport /${EXPORTDIR}/${DSTAMP}\n" 2>&1 | ${LOGGY}
+JOBID=$( ${ZXSUITE} backup doExport /${EXPORTDIR}/${DSTAMP} | grep "monitorCommand" | awk '{ print $5}' ) 
+
+printf "JobID for this operation is ${JOBID}\n" 2>&1 | ${LOGGY}
+
+} 
+
+
+###########
+# WAITING #
+###########
+
+function dowait {
+while true
+do
+printf  "..............\n" 2>&1 | ${LOGGY}
+${ZXSUITE} backup getAllOperations | grep ${JOBID} 
+if [ $? -ne 0 ] ; then
+	printf "Not found - must have finished\n" 2>&1 | ${LOGGY}
+	break
+	else
+	sleep ${SLEEPING}
+		printf "Finished sleeping - checking again\n" 2>&1 | ${LOGGY}
+fi
+done
+
+printf  "..............\n" 2>&1 | ${LOGGY}
+
+}
+
+############
+# COMPRESS #
+############
+
+function docompress {
+# in the case of the full backup, we take all the files and compress them
+# in the case of the incremental backup, so compress all the log files.
+
+	printf "+++++++++++\n Using Pigz to compress backup files.\n" 2>&1 | ${LOGGY}
+	cd /${EXPORTDIR}/
+	${TIME} $( ${TAR} -cf - ./${DSTAMP} | ${PIGZ} > ${DSTAMP}.tar.gz ) 2>&1 | ${LOGGY}
+	error
+	printf "+++++++++++\n" 2>&1 | ${LOGGY}
+}
+
+
+###############
+# REMOTE COPY #
+###############
+
+function remotecopy {
+# Assuming ~/.ssh/id_rsa.pub and ~/.ssh/id_rsa as ssh keys
+
+# We need to check if the directories on the remote host exist 
+# first, and if not, error and exit
+
+	printf "-----------------\n ${SSH} -i ${HOMEPATH}/${RSA} -p2201 -o LogLevel=error ${REMOTEUSER}@${REMOTEHOST} 'ls -al /${REMOTEPATH}/'\n" 2>&1 | ${LOGGY}
+	${SSH} -i ${HOMEPATH}/${RSA} -p2201 -o LogLevel=error ${REMOTEUSER}@${REMOTEHOST} "ls -al /${REMOTEPATH}/" 2>&1 | ${LOGGY}
+	printf "-----------------\n" | ${LOGGY}
+
+#error
+
+#if [ $? -ne 0 ] ; then
+#        echo "Directory ${BCKTYPE} failed...."
+#        ssh ${REMOTEHOST} "mkdir -p ${REMOTEPATH}/${BCKTYPE}/"
+#else
+#        echo "Directory exits...."
+#fi
+
+# OK, now we have confirmed the directories exist.
+# Let's move forward with syncing the data
+
+	printf "=================\n ${SCP} -P${REMOTEPORT} ${DSTAMP}.tar.gz  -i ${HOMEPATH}/${RSA} ${REMOTEUSER}@${REMOTEHOST}:/${REMOTEPATH}/\n"  | ${LOGGY}
+	${TIME} ${SCP} -o LogLevel=Error -P${REMOTEPORT} -i ${HOMEPATH}/${RSA} ${DSTAMP}.tar.gz  ${REMOTEUSER}@${REMOTEHOST}:/${REMOTEPATH}/ 2>&1 | ${LOGGY}
+	printf "=================\n" | ${LOGGY}
+
+	error	
+
+}
+
+
+###########
+# CLEARUP #
+###########
+# Make this as safe as possible.
+
+function doclearup {
+
+# So - if either ${EXPORTDIR} or ${DSTAMP} is non-existant - fail out 
+
+	printf "This is the clearup section\n" | ${LOGGY}
+	printf "EXPORT DIR = ${EXPORTDIR}, STAMP = ${DSTAMP}\n"  | ${LOGGY}
+	if [[ -z 	$EXPORTDIR ||  -z $DSTAMP ]] ; then
+		printf "\tHmmm - variables are zerod! SHITE!\n" | ${LOGGY}
+		exit 2
+	else 
+		printf "\tVariables are REAL!!\n" | ${LOGGY}
+		cd /${EXPORTDIR}/
+		pwd | ${LOGGY}
+		printf "rm -rf ${DSTAMP}\n" | ${LOGGY}
+		rm -rf ${DSTAMP}
+	fi
+
+# We are also going to remove one from a week ago!
+	printf "Removing the file from a week ago..... \n" | ${LOGGY}
+OLDSTAMP=$(  date  --date="${NUMCOPIES} ${INTERVALS} ago"  +2210-%d-%h-%Y ) 
+echo ${OLDSTAMP}
+	if [[ -z 	$EXPORTDIR ||  -z $OLDSTAMP ]] ; then
+		printf "\tHmmm - variables are zerod! SHITE!\n" | ${LOGGY}
+		exit 2
+	else 
+		printf "\tVariables are REAL!!\n" | ${LOGGY}
+		cd /${EXPORTDIR}/
+		pwd | ${LOGGY}
+		printf "rm -rf ${OLDSTAMP}.tar.gz\n" | ${LOGGY}
+		rm  ${OLDSTAMP}.tar.gz
+	fi
+
+
+}
+
+###################
+# THE (DEAD) BODY #
+#  MAIN CORPS(E)  #
+###################
+# Now let's declare some variables.
+# Let's get a Date Stamp to be able to append to the new shiny dumps.
+DSTAMP=$( date +%H%M-%d-%h-%Y )
+
+
+# Paranoia as to where binaries live.
+TEE="/usr/bin/tee"
+SED="/bin/sed"
+GREP="/bin/grep"
+TAR="/bin/tar"
+TIME="/usr/bin/time -f "\t%E real,\t%U user,\t%S sys""
+PIGZ="/usr/bin/pigz"
+SSH="/usr/bin/ssh"
+SCP="/usr/bin/scp"
+MAILX="/usr/bin/mailx"
+ZXSUITE="/opt/zimbra/bin/zxsuite"
+
+
+# VARIABLES
+###################
+
+EXPORTDIR="zexport2"
+# Minumum disk space required
+MINSPACE=15
+WARNSPACE=20
+
+# Number of copies of backup to keep locally
+# So - we work out today's date -  but 8 iterations ago (initially this will be days, but will move to weekly, so 8 weekly)- and then remove that file :-D )
+NUMCOPIES=12
+INTERVALS=weeks
+
+# How long to sleep for
+SLEEPING="300"
+
+# REMOTEHOST  DETAILS
+REMOTEHOST="endor.kairnsdata.net"
+REMOTEPORT="2201"
+REMOTEUSER="zimbra"
+REMOTEPATH="${EXPORTDIR}"
+
+LOGDIR="/home/zimbra-kr/backups/logs/ZEX"
+HOMEPATH="/opt/zimbra"
+RSA=".ssh/id_rsa"
+
+# We need logs. 
+LOG="${LOGDIR}/ZEX-${DSTAMP}.log"
+#LOG="ZEX-0958-14-Nov-2017.log"
+echo "LOGFILE = ${LOG}"
+
+# Bored with "${TEE} -a >> ${LOG} every few lines....
+# so.. create variable to call every time
+LOGGY="${TEE} -a ${LOG} "
+
+# Start something
+	touch ${LOG}
+	printf "We are starting Postie Export at ${DSTAMP}.\n" 2>&1 | ${LOGGY}
+
+# Make the destination directory
+	printf "Do we have enough disk space in the destination?.\n" 2>&1 | ${LOGGY}
+	spacecheck
+
+# Make the destination directory
+	printf "Making the desintation directory.\n" 2>&1 | ${LOGGY}
+	mkdestination
+
+# Call the backup routine
+	printf "Calling zxsuite backup export.\n " 2>&1 | ${LOGGY}
+	doexport
+
+# Do the monitor and wait
+	printf "Monitoring and waiting.\n" 2>&1 | ${LOGGY}
+	dowait
+	wait
+
+# Now compress everything
+	printf "Calling Compression.\n" 2>&1 | ${LOGGY}
+	docompress 
+	wait
+
+# Call the remote copy
+	printf "Calling Remote copy.\n" 2>&1 | ${LOGGY}
+	remotecopy 
+	wait
+
+# Remove local directory
+	printf "Clearing up.\n" 2>&1 | ${LOGGY}
+	doclearup 
+	wait
+# END of the main stuff
+
+
+# Error checking ..
+if [ ${ERROR} -gt 0 ] ; then
+	printf "Something failed.\n" 2>&1 | ${LOGGY}
+	MSTATUS=FAILED
+else
+	printf "Something didn't fail.\n" 2>&1 | ${LOGGY}
+	MSTATUS=OK
+fi
+mailer ${MSTATUS}
+
+# END of the STIFF (Dead body - aka CORPS(E) )

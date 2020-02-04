@@ -1,0 +1,40 @@
+#!/bin/bash
+
+# so some notes.
+# We are doing to get a list of domains that are listed in Zimbra, then look at all of them, and see if there is a "zimbraPublicServiceHostname" for them
+
+# It's not 100% assured to get all the references - but in all honestly - if an admin hasn't got tyhis set for the domains they are hosting
+# and they have a DNS record for that domain to point at the zimbra server - they are going to run into a butt-load of problems - end -of.
+ZMPATH="/opt/zimbra/bin/"
+HN=$(${ZMPATH}/zmhostname)
+
+declare -a ALLHOSTS
+ALLHOSTS[1]="-d"
+ALLHOSTS[2]=${HN}
+
+
+echo "Hosts are ${ALLHOSTS[*]}"
+COUNT=2
+
+for i in $( ${ZMPATH}/zmprov gad ) 
+do 
+
+
+echo "Domain ${i}" 
+MOO=$( ${ZMPATH}/zmprov gd ${i} | grep "zimbraPublicServiceHostname" |awk -F":" '{ print $2 }' | sed 's/ //' )
+
+if [ ! -z ${MOO}  ] ; then
+	echo "We have  variable ... ${MOO} "
+	(( COUNT = ${COUNT} + 1 ))
+	echo ${COUNT}
+	ALLHOSTS[${COUNT}]="-d"
+	(( COUNT = ${COUNT} + 1 ))
+	echo ${COUNT}
+	ALLHOSTS[${COUNT}]=${MOO}
+	echo "- All the domains ? - ${ALLHOSTS[*]}"
+	else
+	echo " We don't have a variable ...  ${MOO} "
+	echo ${COUNT}
+fi
+
+done 
